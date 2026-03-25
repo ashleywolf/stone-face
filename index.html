@@ -43,6 +43,32 @@ canvas { display: block; width: 100%; height: 100%; }
   border: 2px solid #30363d;
 }
 #composure-graph { border-radius: 8px; margin-top: 12px; }
+#share-card-container {
+  margin: 16px auto 0;
+  max-width: 600px;
+}
+#share-card-canvas {
+  width: 100%;
+  border-radius: 8px;
+  border: 2px solid #30363d;
+}
+.share-buttons {
+  display: flex; gap: 8px; justify-content: center;
+  margin-top: 12px; flex-wrap: wrap;
+}
+.share-buttons button {
+  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+  padding: 8px 16px; font-size: 14px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; transition: background 0.2s;
+}
+.share-buttons button:hover { background: #30363d; }
+.share-buttons .primary-share {
+  background: #238636; border-color: #238636;
+}
+.share-buttons .primary-share:hover { background: #2ea043; }
+.share-status {
+  font-size: 12px; color: #39d353; margin-top: 6px; min-height: 18px;
+}
 .hidden { display: none !important; }
 </style>
 </head>
@@ -853,6 +879,176 @@ function drawFlashingBorder(elapsed) {
   ctx.restore();
 }
 
+// --- Share Card ---
+function renderShareCard(won, survivalTime) {
+  const cardW = 1200, cardH = 630;
+  const sc = document.createElement("canvas");
+  sc.width = cardW;
+  sc.height = cardH;
+  const c = sc.getContext("2d");
+
+  // Background
+  c.fillStyle = "#0d1117";
+  c.fillRect(0, 0, cardW, cardH);
+
+  // Subtle grid pattern
+  c.strokeStyle = "rgba(48,54,61,0.3)";
+  c.lineWidth = 1;
+  for (let x = 0; x < cardW; x += 30) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, cardH); c.stroke(); }
+  for (let y = 0; y < cardH; y += 30) { c.beginPath(); c.moveTo(0, y); c.lineTo(cardW, y); c.stroke(); }
+
+  // Find the worst screenshot (highest deviation) or victory shot
+  let heroShot = null;
+  if (screenshots.length > 0) {
+    heroShot = screenshots.reduce((best, s) => s.deviation > best.deviation ? s : best, screenshots[0]);
+  }
+
+  // Draw hero webcam frame (left side)
+  const frameX = 40, frameY = 80, frameW = 480, frameH = 360;
+  c.fillStyle = "#161b22";
+  c.fillRect(frameX - 4, frameY - 4, frameW + 8, frameH + 8);
+
+  if (heroShot) {
+    const img = new Image();
+    img.src = heroShot.url;
+    try {
+      c.drawImage(img, frameX, frameY, frameW, frameH);
+    } catch(e) {
+      c.fillStyle = "#21262d";
+      c.fillRect(frameX, frameY, frameW, frameH);
+    }
+  } else {
+    c.fillStyle = "#21262d";
+    c.fillRect(frameX, frameY, frameW, frameH);
+    c.fillStyle = "#8b949e";
+    c.font = "24px -apple-system, sans-serif";
+    c.textAlign = "center";
+    c.fillText("No screenshot", frameX + frameW / 2, frameY + frameH / 2);
+  }
+
+  // Frame border color based on win/lose
+  c.strokeStyle = won ? "#39d353" : "#f85149";
+  c.lineWidth = 4;
+  c.strokeRect(frameX - 4, frameY - 4, frameW + 8, frameH + 8);
+
+  // Corner brackets for dramatic framing
+  const bLen = 30, bW = 3;
+  c.strokeStyle = won ? "#39d353" : "#f85149";
+  c.lineWidth = bW;
+  [[frameX-8, frameY-8, 1, 1], [frameX+frameW+8, frameY-8, -1, 1],
+   [frameX-8, frameY+frameH+8, 1, -1], [frameX+frameW+8, frameY+frameH+8, -1, -1]].forEach(([bx, by, dx, dy]) => {
+    c.beginPath();
+    c.moveTo(bx + dx * bLen, by);
+    c.lineTo(bx, by);
+    c.lineTo(bx, by + dy * bLen);
+    c.stroke();
+  });
+
+  // Right side: Title
+  const textX = 570;
+  c.textAlign = "left";
+  c.fillStyle = "#e6edf3";
+  c.font = "bold 48px -apple-system, sans-serif";
+  c.fillText("STONE FACE", textX, 120);
+
+  // Result
+  if (won) {
+    c.fillStyle = "#39d353";
+    c.font = "bold 32px -apple-system, sans-serif";
+    c.fillText("CHAMPION", textX, 165);
+    c.fillStyle = "#e6edf3";
+    c.font = "28px -apple-system, sans-serif";
+    c.fillText("Survived 60 seconds", textX, 210);
+  } else {
+    c.fillStyle = "#f85149";
+    c.font = "bold 32px -apple-system, sans-serif";
+    c.fillText("CRACKED", textX, 165);
+    c.fillStyle = "#e6edf3";
+    c.font = "bold 64px -apple-system, sans-serif";
+    c.fillText(survivalTime + "s", textX, 250);
+  }
+
+  // The provocation that broke them (last active one)
+  if (!won && activeProvocations.length > 0) {
+    const breakingProv = activeProvocations[activeProvocations.length - 1].text;
+    c.fillStyle = "#f0c674";
+    c.font = "italic 18px -apple-system, sans-serif";
+    const maxW = cardW - textX - 40;
+    // Word wrap
+    const words = breakingProv.split(" ");
+    let line = '"';
+    let lineY = won ? 240 : 300;
+    words.forEach(w => {
+      const test = line + w + " ";
+      if (c.measureText(test).width > maxW && line.length > 1) {
+        c.fillText(line, textX, lineY);
+        lineY += 24;
+        line = w + " ";
+      } else {
+        line = test;
+      }
+    });
+    c.fillText(line.trimEnd() + '"', textX, lineY);
+  }
+
+  // Mini composure sparkline
+  if (composureHistory.length > 1) {
+    const spX = textX, spY = won ? 270 : 360, spW = 560, spH = 80;
+
+    c.fillStyle = "rgba(22,27,34,0.8)";
+    c.fillRect(spX, spY, spW, spH);
+    c.strokeStyle = "#21262d";
+    c.lineWidth = 1;
+    c.strokeRect(spX, spY, spW, spH);
+
+    // Label
+    c.fillStyle = "#8b949e";
+    c.font = "11px -apple-system, sans-serif";
+    c.textAlign = "left";
+    c.fillText("COMPOSURE", spX + 4, spY - 4);
+
+    // Draw the line
+    c.beginPath();
+    c.lineWidth = 2;
+    const maxT = GAME_DURATION;
+    composureHistory.forEach((pt, i) => {
+      const x = spX + (pt.t / maxT) * spW;
+      const y = spY + spH - (pt.v / COMPOSURE_MAX) * spH;
+      if (pt.v / COMPOSURE_MAX > 0.6) c.strokeStyle = "#39d353";
+      else if (pt.v / COMPOSURE_MAX > 0.3) c.strokeStyle = "#f0c674";
+      else c.strokeStyle = "#f85149";
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    });
+    c.stroke();
+  }
+
+  // Challenge text
+  c.textAlign = "left";
+  c.fillStyle = "#8b949e";
+  c.font = "20px -apple-system, sans-serif";
+  const challengeY = won ? 390 : 480;
+  c.fillText(won ? "Can you survive 60 seconds?" : `Can you beat ${survivalTime}s?`, textX, challengeY);
+
+  // Bottom bar
+  c.fillStyle = "#161b22";
+  c.fillRect(0, cardH - 60, cardW, 60);
+  c.fillStyle = "#8b949e";
+  c.font = "16px -apple-system, sans-serif";
+  c.textAlign = "center";
+  c.fillText("Keep a straight face. The game fights back.", cardW / 2, cardH - 24);
+
+  // Screenshot count badge (bottom-left)
+  if (screenshots.length > 0 && !won) {
+    const badgeText = screenshots.length + " moment" + (screenshots.length !== 1 ? "s" : "") + " of weakness";
+    c.textAlign = "left";
+    c.fillStyle = "#f85149";
+    c.font = "bold 13px -apple-system, sans-serif";
+    c.fillText(badgeText, frameX, frameY + frameH + 24);
+  }
+
+  return sc;
+}
+
 // --- Game Over Screen ---
 function showGameOver(won) {
   state = "gameover";
@@ -883,94 +1079,101 @@ function showGameOver(won) {
   overlay.classList.add("interactive");
   overlayBg.style.display = "block";
 
+  // Build the share card
+  const shareCanvas = renderShareCard(won, survivalTime);
+
   let html = "";
   if (won) {
-    html += `<h1 style="color:#f0c674;font-size:56px;text-shadow:0 0 30px rgba(240,198,100,0.5);">STONE FACE CHAMPION!</h1>`;
-    html += `<p style="color:#e6edf3;">You survived 60 seconds${finalComposure >= 100 ? ' with full composure' : ''}. Respect.</p>`;
+    html += `<h1 style="color:#f0c674;font-size:42px;text-shadow:0 0 30px rgba(240,198,100,0.5);margin-bottom:8px;">STONE FACE CHAMPION!</h1>`;
   } else {
-    html += `<h1 style="color:#f85149;">YOU CRACKED!</h1>`;
-    html += `<p style="color:#e6edf3;">You lasted ${survivalTime} seconds.</p>`;
+    html += `<h1 style="color:#f85149;margin-bottom:8px;">YOU CRACKED!</h1>`;
   }
 
   if (isNewRecord) {
-    html += `<p style="color:#f0c674;font-size:22px;font-weight:bold;margin:8px 0;">\u{1F3C6} NEW RECORD!</p>`;
+    html += `<p style="color:#f0c674;font-size:18px;font-weight:bold;margin:4px 0;">\u{1F3C6} NEW RECORD!</p>`;
   }
 
-  // Composure graph
-  if (composureHistory.length > 1) {
-    html += `<canvas id="composure-graph" width="500" height="120"></canvas>`;
-  }
+  // Share card as hero element
+  html += `<div id="share-card-container"><canvas id="share-card-canvas"></canvas></div>`;
+  html += `<div class="share-buttons">`;
+  html += `<button class="primary-share" id="downloadBtn">\u{2B07}\u{FE0F} Save Image</button>`;
+  html += `<button id="copyBtn">\u{1F4CB} Copy</button>`;
+  html += `<button id="nativeShareBtn">\u{1F4E4} Share</button>`;
+  html += `</div>`;
+  html += `<div class="share-status" id="shareStatus"></div>`;
 
-  // Screenshot gallery
-  if (screenshots.length > 0) {
-    html += `<p style="font-size:14px;color:#8b949e;margin-top:16px;">Moments of weakness (${screenshots.length})</p>`;
+  // Collapsible gallery
+  if (screenshots.length > 1) {
+    html += `<details style="margin-top:12px;"><summary style="font-size:13px;color:#8b949e;cursor:pointer;">All moments of weakness (${screenshots.length})</summary>`;
     html += `<div id="game-over-gallery">`;
     screenshots.forEach(s => {
       html += `<img src="${s.url}" title="t=${s.time.toFixed(1)}s dev=${s.deviation.toFixed(2)}">`;
     });
-    html += `</div>`;
+    html += `</div></details>`;
   }
 
-  html += `<button id="replayBtn">Play Again</button>`;
+  html += `<button id="replayBtn" style="margin-top:16px;">Play Again</button>`;
   overlayContent.innerHTML = html;
 
-  // Draw composure graph
+  // Render share card into the visible canvas
   requestAnimationFrame(() => {
-    const graphCanvas = document.getElementById("composure-graph");
-    if (graphCanvas && composureHistory.length > 1) {
-      const gctx = graphCanvas.getContext("2d");
-      const gw = graphCanvas.width;
-      const gh = graphCanvas.height;
-      gctx.fillStyle = "#161b22";
-      gctx.fillRect(0, 0, gw, gh);
+    const visibleCanvas = document.getElementById("share-card-canvas");
+    if (visibleCanvas) {
+      visibleCanvas.width = shareCanvas.width;
+      visibleCanvas.height = shareCanvas.height;
+      visibleCanvas.getContext("2d").drawImage(shareCanvas, 0, 0);
+    }
 
-      // Grid lines
-      gctx.strokeStyle = "#21262d";
-      gctx.lineWidth = 1;
-      for (let i = 0; i <= 4; i++) {
-        const gy = gh * i / 4;
-        gctx.beginPath(); gctx.moveTo(0, gy); gctx.lineTo(gw, gy); gctx.stroke();
+    // Download button
+    document.getElementById("downloadBtn")?.addEventListener("click", () => {
+      shareCanvas.toBlob(blob => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `stone-face-${survivalTime}s.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        document.getElementById("shareStatus").textContent = "Saved!";
+      }, "image/png");
+    });
+
+    // Copy to clipboard
+    document.getElementById("copyBtn")?.addEventListener("click", async () => {
+      try {
+        const blob = await new Promise(r => shareCanvas.toBlob(r, "image/png"));
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        document.getElementById("shareStatus").textContent = "Copied to clipboard!";
+      } catch(e) {
+        document.getElementById("shareStatus").textContent = "Copy not supported in this browser";
       }
+    });
 
-      // Line
-      gctx.beginPath();
-      gctx.strokeStyle = "#39d353";
-      gctx.lineWidth = 2;
-      composureHistory.forEach((pt, i) => {
-        const x = (pt.t / GAME_DURATION) * gw;
-        const y = gh - (pt.v / COMPOSURE_MAX) * gh;
-        if (pt.v / COMPOSURE_MAX > 0.6) gctx.strokeStyle = "#39d353";
-        else if (pt.v / COMPOSURE_MAX > 0.3) gctx.strokeStyle = "#f0c674";
-        else gctx.strokeStyle = "#f85149";
-        if (i === 0) gctx.moveTo(x, y); else gctx.lineTo(x, y);
+    // Native share (mobile)
+    const nativeBtn = document.getElementById("nativeShareBtn");
+    if (navigator.share && navigator.canShare) {
+      nativeBtn?.addEventListener("click", async () => {
+        try {
+          const blob = await new Promise(r => shareCanvas.toBlob(r, "image/png"));
+          const file = new File([blob], `stone-face-${survivalTime}s.png`, { type: "image/png" });
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({
+              title: "Stone Face",
+              text: won ? "I survived 60 seconds of Stone Face!" : `I lasted ${survivalTime}s at Stone Face. Can you beat that?`,
+              files: [file]
+            });
+          } else {
+            await navigator.share({
+              title: "Stone Face",
+              text: won ? "I survived 60 seconds of Stone Face!" : `I lasted ${survivalTime}s at Stone Face. Can you beat that?`
+            });
+          }
+        } catch(e) {
+          if (e.name !== "AbortError") {
+            document.getElementById("shareStatus").textContent = "Share cancelled";
+          }
+        }
       });
-      gctx.stroke();
-
-      // Peak deviation marker
-      let peakIdx = 0, peakDev = 0;
-      composureHistory.forEach((pt, i) => {
-        if (pt.d > peakDev) { peakDev = pt.d; peakIdx = i; }
-      });
-      if (peakDev > 0) {
-        const px = (composureHistory[peakIdx].t / GAME_DURATION) * gw;
-        const py = gh - (composureHistory[peakIdx].v / COMPOSURE_MAX) * gh;
-        gctx.fillStyle = "#f85149";
-        gctx.beginPath(); gctx.arc(px, py, 5, 0, Math.PI * 2); gctx.fill();
-        gctx.fillStyle = "#e6edf3";
-        gctx.font = "11px sans-serif";
-        gctx.textAlign = "center";
-        gctx.fillText("peak", px, py - 10);
-      }
-
-      // Labels
-      gctx.fillStyle = "#8b949e";
-      gctx.font = "10px sans-serif";
-      gctx.textAlign = "left";
-      gctx.fillText("100%", 4, 12);
-      gctx.fillText("0%", 4, gh - 4);
-      gctx.textAlign = "center";
-      gctx.fillText("0s", 20, gh - 4);
-      gctx.fillText("60s", gw - 20, gh - 4);
+    } else if (nativeBtn) {
+      nativeBtn.style.display = "none";
     }
 
     document.getElementById("replayBtn")?.addEventListener("click", () => resetGame());
