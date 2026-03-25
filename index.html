@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stone Face</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; color: #e6edf3; }
+canvas { display: block; width: 100%; height: 100%; }
+#overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 10; pointer-events: none;
+}
+#overlay.interactive { pointer-events: auto; }
+#overlay-bg {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(13,17,23,0.92);
+}
+#overlay-content {
+  position: relative; z-index: 11; text-align: center; max-width: 700px; padding: 40px;
+}
+#overlay h1 { font-size: 64px; margin-bottom: 12px; letter-spacing: 4px; }
+#overlay h2 { font-size: 24px; font-weight: 400; color: #8b949e; margin-bottom: 8px; }
+#overlay p { font-size: 18px; color: #8b949e; margin-bottom: 24px; }
+#overlay button {
+  background: #238636; color: #fff; border: none; padding: 14px 40px;
+  font-size: 20px; border-radius: 8px; cursor: pointer; margin-top: 16px;
+  transition: background 0.2s;
+}
+#overlay button:hover { background: #2ea043; }
+.countdown-text { font-size: 120px; font-weight: 700; color: #f0c674; }
+.calibration-text { font-size: 28px; color: #58a6ff; }
+.calibration-sub { font-size: 18px; color: #8b949e; margin-top: 8px; }
+
+#game-over-gallery {
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+  margin-top: 16px; max-height: 240px; overflow-y: auto;
+}
+#game-over-gallery img {
+  width: 140px; height: 105px; object-fit: cover; border-radius: 6px;
+  border: 2px solid #30363d;
+}
+#composure-graph { border-radius: 8px; margin-top: 12px; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<video id="webcam" autoplay playsinline style="display:none;"></video>
+<canvas id="gameCanvas"></canvas>
+<div id="overlay" class="interactive">
+  <div id="overlay-bg"></div>
+  <div id="overlay-content">
+    <h1>STONE FACE</h1>
+    <h2>Keep a straight face for 60 seconds</h2>
+    <p>The game will throw everything it can at you. Don't react.</p>
+    <button id="startBtn">Start Game</button>
+  </div>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const video = document.getElementById("webcam");
+const overlay = document.getElementById("overlay");
+const overlayBg = document.getElementById("overlay-bg");
+const overlayContent = document.getElementById("overlay-content");
+const startBtn = document.getElementById("startBtn");
+
+let faceLandmarker = null;
+let audioCtx = null;
+let droneOsc = null;
+let droneGain = null;
+
+// Game state
+const GAME_DURATION = 60;
+const COMPOSURE_MAX = 100;
+const DRAIN_MULTIPLIER = 2.0;
+const REGEN_RATE = 0.5;
+const MINOR_THRESHOLD = 0.15;
+const BUSTED_THRESHOLD = 0.4;
+const NEUTRAL_THRESHOLD = 0.05;
+const BUSTED_PENALTY = 15;
+
+const BLENDSHAPE_KEYS = [
+  "mouthSmileLeft", "mouthSmileRight",
+  "jawOpen",
+  "browOuterUpLeft", "browOuterUpRight",
+  "eyeSquintLeft", "eyeSquintRight",
+  "cheekPuff",
+  "mouthPucker"
+];
+
+const EXPRESSION_GROUPS = {
+  smile: ["mouthSmileLeft", "mouthSmileRight"],
+  surprise: ["jawOpen", "browOuterUpLeft", "browOuterUpRight"],
+  laugh: ["jawOpen", "mouthSmileLeft", "mouthSmileRight"],
+  eyebrow: ["browOuterUpLeft", "browOuterUpRight"],
+  squint: ["eyeSquintLeft", "eyeSquintRight"],
+  cheekPuff: ["cheekPuff"],
+  pucker: ["mouthPucker"]
+};
+
+let state = "title"; // title, calibrating, countdown, playing, gameover
+let baseline = {};
+let composure = COMPOSURE_MAX;
+let timeRemaining = GAME_DURATION;
+let gameStartTime = 0;
+let lastFrameTime = 0;
+let screenshots = [];
+let composureHistory = [];
+let currentDeviation = 0;
+let bustedFlash = 0;
+let lastBustedTime = 0;
+let activeProvocations = [];
+let activeEmoji = [];
+let provocationIndex = 0;
+let lastProvTime = 0;
+let lastEmojiTime = 0;
+let lastSoundTime = 0;
+let activeFilter = null;
+let filterStartTime = 0;
+let lastFilterTime = 0;
+let expressionIndicators = { smile: 0, surprise: 0, laugh: 0, eyebrow: 0 };
+let calibrationSamples = [];
+let calibrationStart = 0;
+let countdownValue = 3;
+let countdownStart = 0;
+let canvasW = 0, canvasH = 0;
+let webcamReady = false;
+let borderFlash = 0;
+
+const PROVOCATIONS = {
+  emoji: ["🐔", "💩", "🤡", "🍕", "👀", "🦆", "🧠", "👻", "🤖", "🌮", "🐸", "💀", "🥴", "🫠", "🤪", "🙃"],
+  text: [
+    "Don't think about elephants",
+    "Your fly is down",
+    "There's something behind you",
+    "I can see you trying not to smile",
+    "Think about the funniest thing you've ever seen",
+    "You're on camera right now",
+    "Your face looks weird when you try to be neutral",
+    "Almost there... JUST KIDDING",
+    "The audience is laughing at you",
+    "Quick, what's your PIN number?",
+    "I know what you did last summer",
+    "You look like a wax figure right now",
+    "Bet you can't help but smile if I say... PUPPIES",
+    "Your nose just moved",
+    "ERROR 404: Personality not found",
+    "You blinked. That counts.",
+    "Is that a smile? I think that's a smile.",
+    "Remember that one embarrassing thing you did?",
+    "Pssst... your webcam light is on",
+    "You have something in your teeth"
+  ],
+  sounds: [
+    { name: "slide whistle", freqs: [[1000, 200]], duration: 500, type: "sine" },
+    { name: "boing", freqs: [[200, 800], [800, 200]], duration: 300, type: "sine" },
+    { name: "duck", freqs: [[600, 400], [400, 600]], duration: 200, type: "square" },
+    { name: "buzz", freqs: [[100, 120]], duration: 500, type: "sawtooth" },
+    { name: "ding", freqs: [[880, 880]], duration: 100, type: "sine" },
+    { name: "fart", freqs: [[120, 60]], duration: 600, type: "sawtooth" },
+    { name: "splat", freqs: [[400, 100]], duration: 200, type: "triangle" },
+    { name: "wobble", freqs: [[300, 500], [500, 300], [300, 500]], duration: 400, type: "sine" }
+  ]
+};
+
+const FILTERS = ["stretch-h", "stretch-v", "invert", "hue-rotate", "mirror", "fisheye", "tiny-head"];
+
+// --- Init MediaPipe ---
+async function initFaceLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU"
+    },
+    outputFaceBlendshapes: true,
+    runningMode: "VIDEO",
+    numFaces: 1
+  });
+}
+
+async function initWebcam() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }
+  });
+  video.srcObject = stream;
+  await new Promise(r => { video.onloadeddata = r; });
+  webcamReady = true;
+}
+
+function resizeCanvas() {
+  canvasW = window.innerWidth;
+  canvasH = window.innerHeight;
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+}
+
+// --- Audio ---
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+}
+
+function playSound(sound) {
+  ensureAudio();
+  const now = audioCtx.currentTime;
+  const segDur = sound.duration / 1000 / sound.freqs.length;
+  sound.freqs.forEach((pair, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = sound.type || "sine";
+    osc.frequency.setValueAtTime(pair[0], now + i * segDur);
+    osc.frequency.linearRampToValueAtTime(pair[1], now + (i + 1) * segDur);
+    gain.gain.setValueAtTime(0.15, now + i * segDur);
+    gain.gain.linearRampToValueAtTime(0, now + (i + 1) * segDur + 0.05);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now + i * segDur);
+    osc.stop(now + (i + 1) * segDur + 0.1);
+  });
+}
+
+function startDrone() {
+  ensureAudio();
+  droneOsc = audioCtx.createOscillator();
+  droneGain = audioCtx.createGain();
+  droneOsc.type = "sine";
+  droneOsc.frequency.value = 55;
+  droneGain.gain.value = 0;
+  droneOsc.connect(droneGain).connect(audioCtx.destination);
+  droneOsc.start();
+}
+
+function updateDrone(elapsed) {
+  if (!droneGain) return;
+  const progress = Math.min(elapsed / GAME_DURATION, 1);
+  droneGain.gain.setTargetAtTime(0.04 + progress * 0.08, audioCtx.currentTime, 0.5);
+  droneOsc.frequency.setTargetAtTime(55 + progress * 40, audioCtx.currentTime, 0.5);
+}
+
+function stopDrone() {
+  if (droneOsc) { try { droneOsc.stop(); } catch(e) {} droneOsc = null; }
+  droneGain = null;
+}
+
+function playBustedSound() {
+  ensureAudio();
+  const now = audioCtx.currentTime;
+  [880, 660, 440].forEach((f, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "square";
+    osc.frequency.value = f;
+    gain.gain.setValueAtTime(0.2, now + i * 0.08);
+    gain.gain.linearRampToValueAtTime(0, now + i * 0.08 + 0.12);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now + i * 0.08);
+    osc.stop(now + i * 0.08 + 0.15);
+  });
+}
+
+function playWinSound() {
+  ensureAudio();
+  const now = audioCtx.currentTime;
+  [262, 330, 392, 523].forEach((f, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = f;
+    gain.gain.setValueAtTime(0.2, now + i * 0.15);
+    gain.gain.linearRampToValueAtTime(0.05, now + i * 0.15 + 0.4);
+    gain.gain.linearRampToValueAtTime(0, now + 1.0);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now + i * 0.15);
+    osc.stop(now + 1.2);
+  });
+}
+
+function playLoseSound() {
+  ensureAudio();
+  const now = audioCtx.currentTime;
+  [392, 370, 349, 200].forEach((f, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = f;
+    gain.gain.setValueAtTime(0.18, now + i * 0.25);
+    gain.gain.linearRampToValueAtTime(0, now + i * 0.25 + (i === 3 ? 0.8 : 0.3));
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now + i * 0.25);
+    osc.stop(now + i * 0.25 + 1.0);
+  });
+}
+
+// --- Blendshapes ---
+function getBlendshapes() {
+  if (!faceLandmarker || !webcamReady) return null;
+  const now = performance.now();
+  try {
+    const results = faceLandmarker.detectForVideo(video, now);
+    if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
+      const map = {};
+      for (const bs of results.faceBlendshapes[0].categories) {
+        if (BLENDSHAPE_KEYS.includes(bs.categoryName)) {
+          map[bs.categoryName] = bs.score;
+        }
+      }
+      return map;
+    }
+  } catch(e) {}
+  return null;
+}
+
+function calcDeviation(current) {
+  if (!current) return 0;
+  let maxDev = 0;
+  // Smile
+  const smileL = Math.max(0, (current.mouthSmileLeft || 0) - (baseline.mouthSmileLeft || 0));
+  const smileR = Math.max(0, (current.mouthSmileRight || 0) - (baseline.mouthSmileRight || 0));
+  maxDev = Math.max(maxDev, (smileL + smileR) / 2);
+  // Jaw
+  const jaw = Math.max(0, (current.jawOpen || 0) - (baseline.jawOpen || 0));
+  maxDev = Math.max(maxDev, jaw);
+  // Brow
+  const browL = Math.max(0, (current.browOuterUpLeft || 0) - (baseline.browOuterUpLeft || 0));
+  const browR = Math.max(0, (current.browOuterUpRight || 0) - (baseline.browOuterUpRight || 0));
+  maxDev = Math.max(maxDev, (browL + browR) / 2);
+  // Squint
+  const sqL = Math.max(0, (current.eyeSquintLeft || 0) - (baseline.eyeSquintLeft || 0));
+  const sqR = Math.max(0, (current.eyeSquintRight || 0) - (baseline.eyeSquintRight || 0));
+  maxDev = Math.max(maxDev, (sqL + sqR) / 2);
+  // Cheek puff
+  const cheek = Math.max(0, (current.cheekPuff || 0) - (baseline.cheekPuff || 0));
+  maxDev = Math.max(maxDev, cheek);
+  // Pucker
+  const pucker = Math.max(0, (current.mouthPucker || 0) - (baseline.mouthPucker || 0));
+  maxDev = Math.max(maxDev, pucker);
+
+  return maxDev;
+}
+
+function detectExpressions(current) {
+  if (!current) return;
+  const smileVal = Math.max(0, ((current.mouthSmileLeft || 0) + (current.mouthSmileRight || 0)) / 2 - ((baseline.mouthSmileLeft || 0) + (baseline.mouthSmileRight || 0)) / 2);
+  const jawVal = Math.max(0, (current.jawOpen || 0) - (baseline.jawOpen || 0));
+  const browVal = Math.max(0, ((current.browOuterUpLeft || 0) + (current.browOuterUpRight || 0)) / 2 - ((baseline.browOuterUpLeft || 0) + (baseline.browOuterUpRight || 0)) / 2);
+
+  expressionIndicators.smile = smileVal > 0.12 ? Math.min(1, smileVal * 3) : 0;
+  expressionIndicators.surprise = (jawVal > 0.15 || browVal > 0.15) ? Math.min(1, Math.max(jawVal, browVal) * 3) : 0;
+  expressionIndicators.laugh = (smileVal > 0.1 && jawVal > 0.1) ? Math.min(1, (smileVal + jawVal) * 2) : 0;
+  expressionIndicators.eyebrow = browVal > 0.12 ? Math.min(1, browVal * 3) : 0;
+}
+
+// --- Screenshot ---
+function takeScreenshot() {
+  const tmpCanvas = document.createElement("canvas");
+  tmpCanvas.width = video.videoWidth;
+  tmpCanvas.height = video.videoHeight;
+  const tmpCtx = tmpCanvas.getContext("2d");
+  tmpCtx.drawImage(video, 0, 0);
+  const dataUrl = tmpCanvas.toDataURL("image/jpeg", 0.7);
+  screenshots.push({ url: dataUrl, time: GAME_DURATION - timeRemaining, deviation: currentDeviation });
+}
+
+// --- Provocations ---
+function spawnEmoji(now) {
+  const emoji = PROVOCATIONS.emoji[Math.floor(Math.random() * PROVOCATIONS.emoji.length)];
+  const side = Math.random() > 0.5 ? "left" : "right";
+  activeEmoji.push({
+    emoji,
+    x: side === "left" ? -60 : canvasW + 60,
+    y: canvasH * 0.2 + Math.random() * canvasH * 0.5,
+    vx: side === "left" ? 2 + Math.random() * 3 : -(2 + Math.random() * 3),
+    vy: (Math.random() - 0.5) * 1.5,
+    size: 40 + Math.random() * 40,
+    rotation: 0,
+    rotSpeed: (Math.random() - 0.5) * 0.1,
+    life: 0, maxLife: 180
+  });
+}
+
+function spawnTextProvocation(webcamRect) {
+  const text = PROVOCATIONS.text[provocationIndex % PROVOCATIONS.text.length];
+  provocationIndex++;
+  activeProvocations.push({
+    text,
+    x: webcamRect.x + webcamRect.w / 2,
+    y: webcamRect.y + webcamRect.h * (0.15 + Math.random() * 0.7),
+    alpha: 0,
+    life: 0,
+    maxLife: 180,
+    phase: "in"
+  });
+}
+
+function playRandomSound() {
+  const s = PROVOCATIONS.sounds[Math.floor(Math.random() * PROVOCATIONS.sounds.length)];
+  playSound(s);
+}
+
+function pickFilter() {
+  activeFilter = FILTERS[Math.floor(Math.random() * FILTERS.length)];
+  filterStartTime = performance.now();
+}
+
+// --- Drawing ---
+function getWebcamRect() {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const maxW = canvasW * 0.65;
+  const maxH = canvasH * 0.7;
+  let w = maxW;
+  let h = w * (vh / vw);
+  if (h > maxH) { h = maxH; w = h * (vw / vh); }
+  const x = (canvasW - w) / 2;
+  const y = (canvasH - h) / 2 + 20;
+  return { x, y, w, h };
+}
+
+function drawWebcam(rect) {
+  ctx.save();
+  const r = 12;
+
+  if (activeFilter && state === "playing") {
+    ctx.save();
+    switch (activeFilter) {
+      case "stretch-h":
+        ctx.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.scale(1.4, 0.85);
+        ctx.translate(-(rect.x + rect.w / 2), -(rect.y + rect.h / 2));
+        break;
+      case "stretch-v":
+        ctx.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.scale(0.85, 1.4);
+        ctx.translate(-(rect.x + rect.w / 2), -(rect.y + rect.h / 2));
+        break;
+      case "mirror":
+        ctx.translate(rect.x + rect.w, rect.y);
+        ctx.scale(-1, 1);
+        ctx.translate(-rect.x, -rect.y);
+        // Fall through to draw mirrored, but we already mirror the base draw
+        // so this double-mirrors (un-mirrors) -- let's do a vertical flip instead
+        ctx.translate(rect.x + rect.w / 2, rect.y + rect.h);
+        ctx.scale(1, -1);
+        ctx.translate(-(rect.x + rect.w / 2), -rect.y);
+        break;
+      case "tiny-head":
+        ctx.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.scale(0.5, 0.5);
+        ctx.translate(-(rect.x + rect.w / 2), -(rect.y + rect.h / 2));
+        break;
+    }
+
+    // Clip rounded rect
+    ctx.beginPath();
+    ctx.moveTo(rect.x + r, rect.y);
+    ctx.arcTo(rect.x + rect.w, rect.y, rect.x + rect.w, rect.y + rect.h, r);
+    ctx.arcTo(rect.x + rect.w, rect.y + rect.h, rect.x, rect.y + rect.h, r);
+    ctx.arcTo(rect.x, rect.y + rect.h, rect.x, rect.y, r);
+    ctx.arcTo(rect.x, rect.y, rect.x + rect.w, rect.y, r);
+    ctx.closePath();
+    ctx.clip();
+
+    // Draw mirrored webcam
+    ctx.translate(rect.x + rect.w, rect.y);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, rect.w, rect.h);
+    ctx.restore();
+
+    // Post-processing filters
+    if (activeFilter === "invert" || activeFilter === "hue-rotate") {
+      ctx.save();
+      ctx.globalCompositeOperation = activeFilter === "invert" ? "difference" : "hue";
+      ctx.fillStyle = activeFilter === "invert" ? "#ffffff" : `hsl(${((performance.now() - filterStartTime) * 0.2) % 360}, 100%, 50%)`;
+      ctx.beginPath();
+      ctx.moveTo(rect.x + r, rect.y);
+      ctx.arcTo(rect.x + rect.w, rect.y, rect.x + rect.w, rect.y + rect.h, r);
+      ctx.arcTo(rect.x + rect.w, rect.y + rect.h, rect.x, rect.y + rect.h, r);
+      ctx.arcTo(rect.x, rect.y + rect.h, rect.x, rect.y, r);
+      ctx.arcTo(rect.x, rect.y, rect.x + rect.w, rect.y, r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    if (activeFilter === "fisheye") {
+      // Barrel distortion via scaled concentric draws
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+      ctx.translate(cx, cy);
+      ctx.scale(1.15, 1.15);
+      ctx.translate(-cx, -cy);
+      ctx.beginPath();
+      ctx.moveTo(rect.x + r, rect.y);
+      ctx.arcTo(rect.x + rect.w, rect.y, rect.x + rect.w, rect.y + rect.h, r);
+      ctx.arcTo(rect.x + rect.w, rect.y + rect.h, rect.x, rect.y + rect.h, r);
+      ctx.arcTo(rect.x, rect.y + rect.h, rect.x, rect.y, r);
+      ctx.arcTo(rect.x, rect.y, rect.x + rect.w, rect.y, r);
+      ctx.closePath();
+      ctx.clip();
+      ctx.translate(rect.x + rect.w, rect.y);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, rect.w, rect.h);
+      ctx.restore();
+    }
+  } else {
+    // Normal draw (mirrored)
+    ctx.beginPath();
+    ctx.moveTo(rect.x + r, rect.y);
+    ctx.arcTo(rect.x + rect.w, rect.y, rect.x + rect.w, rect.y + rect.h, r);
+    ctx.arcTo(rect.x + rect.w, rect.y + rect.h, rect.x, rect.y + rect.h, r);
+    ctx.arcTo(rect.x, rect.y + rect.h, rect.x, rect.y, r);
+    ctx.arcTo(rect.x, rect.y, rect.x + rect.w, rect.y, r);
+    ctx.closePath();
+    ctx.clip();
+    ctx.translate(rect.x + rect.w, rect.y);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, rect.w, rect.h);
+  }
+  ctx.restore();
+
+  // Border glow based on deviation
+  if (state === "playing") {
+    ctx.save();
+    const glowColor = currentDeviation > BUSTED_THRESHOLD ? "#f85149" :
+                       currentDeviation > MINOR_THRESHOLD ? "#f0c674" : "#39d353";
+    const glowAlpha = Math.min(1, currentDeviation * 2);
+    ctx.strokeStyle = glowColor;
+    ctx.globalAlpha = 0.3 + glowAlpha * 0.7;
+    ctx.lineWidth = 3 + currentDeviation * 6;
+    ctx.beginPath();
+    ctx.moveTo(rect.x + r, rect.y);
+    ctx.arcTo(rect.x + rect.w, rect.y, rect.x + rect.w, rect.y + rect.h, r);
+    ctx.arcTo(rect.x + rect.w, rect.y + rect.h, rect.x, rect.y + rect.h, r);
+    ctx.arcTo(rect.x, rect.y + rect.h, rect.x, rect.y, r);
+    ctx.arcTo(rect.x, rect.y, rect.x + rect.w, rect.y, r);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawComposureMeter(rect) {
+  const barW = rect.w + 40;
+  const barH = 14;
+  const barX = rect.x - 20;
+  const barY = rect.y - 30;
+  const pct = composure / COMPOSURE_MAX;
+
+  // Background
+  ctx.fillStyle = "#21262d";
+  ctx.beginPath();
+  ctx.roundRect(barX, barY, barW, barH, 7);
+  ctx.fill();
+
+  // Fill
+  const fillW = barW * pct;
+  let color;
+  if (pct > 0.6) color = "#39d353";
+  else if (pct > 0.3) color = "#f0c674";
+  else color = "#f85149";
+
+  if (fillW > 0) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, fillW, barH, 7);
+    ctx.fill();
+  }
+
+  // Label
+  ctx.fillStyle = "#e6edf3";
+  ctx.font = "bold 13px -apple-system, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("COMPOSURE", barX, barY - 6);
+  ctx.textAlign = "right";
+  ctx.fillText(`${Math.round(composure)}%`, barX + barW, barY - 6);
+}
+
+function drawTimer() {
+  const secs = Math.ceil(timeRemaining);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#e6edf3";
+  ctx.font = "bold 48px -apple-system, sans-serif";
+  ctx.fillText(secs + "s", canvasW / 2, 60);
+
+  if (timeRemaining <= 10) {
+    ctx.fillStyle = "#f85149";
+    ctx.globalAlpha = 0.5 + Math.sin(performance.now() * 0.01) * 0.5;
+    ctx.font = "bold 14px -apple-system, sans-serif";
+    ctx.fillText("FINAL COUNTDOWN", canvasW / 2, 82);
+  }
+  ctx.restore();
+}
+
+function drawExpressionIndicators(rect) {
+  const indicators = [
+    { emoji: "\u{1F60A}", key: "smile", color: "#39d353" },
+    { emoji: "\u{1F62E}", key: "surprise", color: "#f0c674" },
+    { emoji: "\u{1F602}", key: "laugh", color: "#f85149" },
+    { emoji: "\u{1F928}", key: "eyebrow", color: "#bc8cff" }
+  ];
+  const spacing = 60;
+  const startX = rect.x + rect.w + 20;
+  const startY = rect.y + 30;
+
+  indicators.forEach((ind, i) => {
+    const y = startY + i * spacing;
+    const val = expressionIndicators[ind.key];
+    ctx.save();
+    ctx.font = "32px serif";
+    ctx.textAlign = "left";
+    ctx.globalAlpha = val > 0 ? 0.4 + val * 0.6 : 0.2;
+    ctx.fillText(ind.emoji, startX, y);
+    if (val > 0) {
+      ctx.globalAlpha = val * 0.6;
+      ctx.shadowColor = ind.color;
+      ctx.shadowBlur = 15 + val * 15;
+      ctx.fillText(ind.emoji, startX, y);
+    }
+    ctx.restore();
+  });
+}
+
+function drawProvocations() {
+  // Floating emoji
+  activeEmoji.forEach(e => {
+    ctx.save();
+    const fadeIn = Math.min(1, e.life / 20);
+    const fadeOut = Math.max(0, 1 - (e.life - e.maxLife + 30) / 30);
+    ctx.globalAlpha = Math.min(fadeIn, fadeOut);
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.rotation);
+    ctx.font = `${e.size}px serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(e.emoji, 0, 0);
+    ctx.restore();
+  });
+
+  // Text provocations
+  activeProvocations.forEach(p => {
+    ctx.save();
+    let alpha;
+    if (p.life < 20) alpha = p.life / 20;
+    else if (p.life > p.maxLife - 30) alpha = (p.maxLife - p.life) / 30;
+    else alpha = 1;
+    ctx.globalAlpha = Math.max(0, alpha);
+    ctx.font = "bold 22px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#f0c674";
+    ctx.shadowColor = "#000";
+    ctx.shadowBlur = 8;
+    ctx.fillText(p.text, p.x, p.y);
+    ctx.restore();
+  });
+}
+
+function drawBustedFlash() {
+  if (bustedFlash <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = bustedFlash;
+  ctx.fillStyle = "#f85149";
+  ctx.fillRect(0, 0, canvasW, canvasH);
+  ctx.globalAlpha = Math.min(1, bustedFlash * 2);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 80px -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("BUSTED!", canvasW / 2, canvasH / 2);
+  ctx.restore();
+}
+
+function drawFlashingBorder(elapsed) {
+  if (elapsed < 50) return;
+  ctx.save();
+  const pulse = Math.sin(performance.now() * 0.015) * 0.5 + 0.5;
+  ctx.strokeStyle = `rgba(248,81,73,${0.3 + pulse * 0.7})`;
+  ctx.lineWidth = 6 + pulse * 6;
+  ctx.strokeRect(0, 0, canvasW, canvasH);
+  ctx.restore();
+}
+
+// --- Game Over Screen ---
+function showGameOver(won) {
+  state = "gameover";
+  stopDrone();
+  if (won) playWinSound(); else playLoseSound();
+
+  overlay.classList.remove("hidden");
+  overlay.classList.add("interactive");
+  overlayBg.style.display = "block";
+
+  let html = "";
+  if (won) {
+    html += `<h1 style="color:#39d353;">STONE FACE CHAMPION!</h1>`;
+    html += `<p style="color:#e6edf3;">You survived 60 seconds without cracking. Respect.</p>`;
+  } else {
+    html += `<h1 style="color:#f85149;">YOU CRACKED!</h1>`;
+    html += `<p style="color:#e6edf3;">You lasted ${Math.round(GAME_DURATION - timeRemaining)} seconds.</p>`;
+  }
+
+  // Composure graph
+  if (composureHistory.length > 1) {
+    html += `<canvas id="composure-graph" width="500" height="120"></canvas>`;
+  }
+
+  // Screenshot gallery
+  if (screenshots.length > 0) {
+    html += `<p style="font-size:14px;color:#8b949e;margin-top:16px;">Moments of weakness (${screenshots.length})</p>`;
+    html += `<div id="game-over-gallery">`;
+    screenshots.forEach(s => {
+      html += `<img src="${s.url}" title="t=${s.time.toFixed(1)}s dev=${s.deviation.toFixed(2)}">`;
+    });
+    html += `</div>`;
+  }
+
+  html += `<button id="replayBtn">Play Again</button>`;
+  overlayContent.innerHTML = html;
+
+  // Draw composure graph
+  requestAnimationFrame(() => {
+    const graphCanvas = document.getElementById("composure-graph");
+    if (graphCanvas && composureHistory.length > 1) {
+      const gctx = graphCanvas.getContext("2d");
+      const gw = graphCanvas.width;
+      const gh = graphCanvas.height;
+      gctx.fillStyle = "#161b22";
+      gctx.fillRect(0, 0, gw, gh);
+
+      // Grid lines
+      gctx.strokeStyle = "#21262d";
+      gctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const gy = gh * i / 4;
+        gctx.beginPath(); gctx.moveTo(0, gy); gctx.lineTo(gw, gy); gctx.stroke();
+      }
+
+      // Line
+      gctx.beginPath();
+      gctx.strokeStyle = "#39d353";
+      gctx.lineWidth = 2;
+      composureHistory.forEach((pt, i) => {
+        const x = (pt.t / GAME_DURATION) * gw;
+        const y = gh - (pt.v / COMPOSURE_MAX) * gh;
+        if (pt.v / COMPOSURE_MAX > 0.6) gctx.strokeStyle = "#39d353";
+        else if (pt.v / COMPOSURE_MAX > 0.3) gctx.strokeStyle = "#f0c674";
+        else gctx.strokeStyle = "#f85149";
+        if (i === 0) gctx.moveTo(x, y); else gctx.lineTo(x, y);
+      });
+      gctx.stroke();
+
+      // Peak deviation marker
+      let peakIdx = 0, peakDev = 0;
+      composureHistory.forEach((pt, i) => {
+        if (pt.d > peakDev) { peakDev = pt.d; peakIdx = i; }
+      });
+      if (peakDev > 0) {
+        const px = (composureHistory[peakIdx].t / GAME_DURATION) * gw;
+        const py = gh - (composureHistory[peakIdx].v / COMPOSURE_MAX) * gh;
+        gctx.fillStyle = "#f85149";
+        gctx.beginPath(); gctx.arc(px, py, 5, 0, Math.PI * 2); gctx.fill();
+        gctx.fillStyle = "#e6edf3";
+        gctx.font = "11px sans-serif";
+        gctx.textAlign = "center";
+        gctx.fillText("peak", px, py - 10);
+      }
+
+      // Labels
+      gctx.fillStyle = "#8b949e";
+      gctx.font = "10px sans-serif";
+      gctx.textAlign = "left";
+      gctx.fillText("100%", 4, 12);
+      gctx.fillText("0%", 4, gh - 4);
+      gctx.textAlign = "center";
+      gctx.fillText("0s", 20, gh - 4);
+      gctx.fillText("60s", gw - 20, gh - 4);
+    }
+
+    document.getElementById("replayBtn")?.addEventListener("click", () => resetGame());
+  });
+}
+
+// --- Game Flow ---
+function resetGame() {
+  composure = COMPOSURE_MAX;
+  timeRemaining = GAME_DURATION;
+  screenshots = [];
+  composureHistory = [];
+  currentDeviation = 0;
+  bustedFlash = 0;
+  lastBustedTime = 0;
+  activeProvocations = [];
+  activeEmoji = [];
+  provocationIndex = 0;
+  lastProvTime = 0;
+  lastEmojiTime = 0;
+  lastSoundTime = 0;
+  activeFilter = null;
+  lastFilterTime = 0;
+  expressionIndicators = { smile: 0, surprise: 0, laugh: 0, eyebrow: 0 };
+  calibrationSamples = [];
+  baseline = {};
+  borderFlash = 0;
+  state = "calibrating";
+  calibrationStart = performance.now();
+
+  overlay.classList.remove("hidden");
+  overlay.classList.add("interactive");
+  overlayBg.style.display = "block";
+  overlayContent.innerHTML = `
+    <div class="calibration-text">Calibrating...</div>
+    <div class="calibration-sub">Look at the camera with a normal, relaxed face.</div>
+    <div class="calibration-sub" style="margin-top:16px;font-size:14px;color:#58a6ff;" id="cal-progress">0%</div>
+  `;
+}
+
+function finishCalibration() {
+  // Average all samples
+  baseline = {};
+  for (const key of BLENDSHAPE_KEYS) {
+    let sum = 0;
+    let count = 0;
+    for (const sample of calibrationSamples) {
+      if (sample[key] !== undefined) { sum += sample[key]; count++; }
+    }
+    baseline[key] = count > 0 ? sum / count : 0;
+  }
+
+  // Start countdown
+  state = "countdown";
+  countdownValue = 3;
+  countdownStart = performance.now();
+  ensureAudio();
+}
+
+function startPlaying() {
+  state = "playing";
+  gameStartTime = performance.now();
+  lastFrameTime = performance.now();
+  overlay.classList.add("hidden");
+  overlay.classList.remove("interactive");
+  startDrone();
+}
+
+// --- Main Loop ---
+function gameLoop(timestamp) {
+  requestAnimationFrame(gameLoop);
+  resizeCanvas();
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  if (!webcamReady) return;
+
+  const rect = getWebcamRect();
+
+  if (state === "calibrating") {
+    drawWebcam(rect);
+    const elapsed = (performance.now() - calibrationStart) / 1000;
+    const progress = Math.min(1, elapsed / 3);
+    const calProg = document.getElementById("cal-progress");
+    if (calProg) calProg.textContent = Math.round(progress * 100) + "%";
+
+    const bs = getBlendshapes();
+    if (bs) calibrationSamples.push(bs);
+
+    if (elapsed >= 3) {
+      finishCalibration();
+    }
+    return;
+  }
+
+  if (state === "countdown") {
+    drawWebcam(rect);
+    const elapsed = (performance.now() - countdownStart) / 1000;
+    const val = 3 - Math.floor(elapsed);
+    if (val !== countdownValue && val >= 0) {
+      countdownValue = val;
+    }
+    if (val <= 0) {
+      startPlaying();
+      return;
+    }
+    overlayContent.innerHTML = `<div class="countdown-text">${val}</div>`;
+    return;
+  }
+
+  if (state === "gameover") {
+    drawWebcam(rect);
+    return;
+  }
+
+  if (state !== "playing") {
+    drawWebcam(rect);
+    return;
+  }
+
+  // --- PLAYING STATE ---
+  const now = performance.now();
+  const dt = Math.min(50, now - lastFrameTime);
+  lastFrameTime = now;
+  const elapsed = (now - gameStartTime) / 1000;
+  timeRemaining = Math.max(0, GAME_DURATION - elapsed);
+
+  // Get blendshapes
+  const bs = getBlendshapes();
+  currentDeviation = calcDeviation(bs);
+  detectExpressions(bs);
+
+  // Composure logic
+  if (currentDeviation > MINOR_THRESHOLD) {
+    composure -= currentDeviation * DRAIN_MULTIPLIER * (dt / 33.33);
+  } else if (currentDeviation < NEUTRAL_THRESHOLD) {
+    composure += REGEN_RATE * (dt / 33.33);
+  }
+
+  // Busted check
+  if (currentDeviation > BUSTED_THRESHOLD && now - lastBustedTime > 2000) {
+    composure -= BUSTED_PENALTY;
+    bustedFlash = 1;
+    lastBustedTime = now;
+    playBustedSound();
+    takeScreenshot();
+  }
+
+  composure = Math.max(0, Math.min(COMPOSURE_MAX, composure));
+
+  // Record history (every ~0.5s)
+  if (composureHistory.length === 0 || elapsed - composureHistory[composureHistory.length - 1].t > 0.5) {
+    composureHistory.push({ t: elapsed, v: composure, d: currentDeviation });
+  }
+
+  // Check win/lose
+  if (composure <= 0) {
+    showGameOver(false);
+    return;
+  }
+  if (timeRemaining <= 0) {
+    showGameOver(true);
+    return;
+  }
+
+  // --- Provocations ---
+  const phase = elapsed < 10 ? 0 : elapsed < 20 ? 1 : elapsed < 30 ? 2 : elapsed < 40 ? 3 : elapsed < 50 ? 4 : 5;
+
+  // Emoji spawning
+  const emojiInterval = phase >= 4 ? 400 : phase >= 3 ? 800 : 1500;
+  if ((phase === 0 || phase >= 3) && now - lastEmojiTime > emojiInterval) {
+    spawnEmoji(now);
+    lastEmojiTime = now;
+  }
+
+  // Text provocations
+  const textInterval = phase >= 4 ? 2000 : phase >= 3 ? 3000 : 4000;
+  if ((phase === 1 || phase >= 3) && now - lastProvTime > textInterval) {
+    spawnTextProvocation(rect);
+    lastProvTime = now;
+  }
+
+  // Filters
+  if (phase === 2 || phase >= 4) {
+    if (now - lastFilterTime > 3000) {
+      pickFilter();
+      lastFilterTime = now;
+    }
+  } else if (phase < 2) {
+    activeFilter = null;
+  }
+
+  // Sound effects
+  const soundInterval = phase >= 5 ? 1500 : phase >= 4 ? 2500 : phase >= 3 ? 4000 : 5000;
+  if (phase >= 3 && now - lastSoundTime > soundInterval) {
+    playRandomSound();
+    lastSoundTime = now;
+  }
+
+  // Update emoji positions
+  activeEmoji = activeEmoji.filter(e => {
+    e.x += e.vx;
+    e.y += e.vy;
+    e.rotation += e.rotSpeed;
+    e.life++;
+    return e.life < e.maxLife && e.x > -100 && e.x < canvasW + 100;
+  });
+
+  // Update text provocations
+  activeProvocations = activeProvocations.filter(p => {
+    p.life++;
+    return p.life < p.maxLife;
+  });
+
+  // Busted flash decay
+  if (bustedFlash > 0) bustedFlash = Math.max(0, bustedFlash - 0.03);
+
+  // Update drone
+  updateDrone(elapsed);
+
+  // --- Draw ---
+  drawWebcam(rect);
+  drawComposureMeter(rect);
+  drawTimer();
+  drawExpressionIndicators(rect);
+  drawProvocations();
+  drawBustedFlash();
+  if (elapsed >= 50) drawFlashingBorder(elapsed);
+}
+
+// --- Startup ---
+async function init() {
+  resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
+
+  startBtn.addEventListener("click", async () => {
+    startBtn.disabled = true;
+    startBtn.textContent = "Loading...";
+    try {
+      await Promise.all([initFaceLandmarker(), initWebcam()]);
+      resetGame();
+    } catch (e) {
+      overlayContent.innerHTML = `
+        <h1>STONE FACE</h1>
+        <p style="color:#f85149;">Error: ${e.message}</p>
+        <p>Make sure you allow camera access and are using Chrome.</p>
+        <button onclick="location.reload()">Retry</button>
+      `;
+    }
+  });
+
+  requestAnimationFrame(gameLoop);
+}
+
+init();
+</script>
+</body>
+</html>
