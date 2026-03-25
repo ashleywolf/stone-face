@@ -43,32 +43,51 @@ canvas { display: block; width: 100%; height: 100%; }
   border: 2px solid #30363d;
 }
 #composure-graph { border-radius: 8px; margin-top: 12px; }
-#share-card-container {
-  margin: 16px auto 0;
-  max-width: 600px;
+
+/* Leaderboard styles */
+.lb-container {
+  border: 1px solid #f0c674; border-radius: 10px; padding: 16px;
+  background: rgba(240,198,100,0.04); margin-top: 16px; max-width: 520px;
+  margin-left: auto; margin-right: auto;
 }
-#share-card-canvas {
-  width: 100%;
-  border-radius: 8px;
-  border: 2px solid #30363d;
+.lb-title { font-size: 18px; font-weight: 700; color: #f0c674; margin-bottom: 10px; }
+.lb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.lb-table th { color: #8b949e; font-weight: 600; text-align: left; padding: 4px 6px; border-bottom: 1px solid #21262d; font-size: 11px; text-transform: uppercase; }
+.lb-table td { padding: 5px 6px; border-bottom: 1px solid #161b22; vertical-align: middle; }
+.lb-table tr.lb-current { background: rgba(240,198,100,0.1); }
+.lb-table tr.lb-current td { color: #f0c674; font-weight: 600; }
+.lb-avatar { width: 24px; height: 24px; border-radius: 50%; vertical-align: middle; background: #30363d; }
+.lb-avatar-placeholder { display: inline-block; width: 24px; height: 24px; border-radius: 50%; background: #30363d; }
+.lb-rank { font-weight: 700; color: #8b949e; min-width: 24px; }
+.lb-save-btn {
+  background: #238636; color: #fff; border: none; padding: 8px 20px;
+  font-size: 14px; border-radius: 6px; cursor: pointer; margin-top: 10px;
+  transition: background 0.2s;
 }
-.share-buttons {
-  display: flex; gap: 8px; justify-content: center;
-  margin-top: 12px; flex-wrap: wrap;
+.lb-save-btn:hover { background: #2ea043; }
+.lb-save-btn:disabled { background: #21262d; color: #8b949e; cursor: default; }
+.lb-save-hint { font-size: 12px; color: #8b949e; margin-top: 6px; }
+
+/* Username input */
+.gh-user-row { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 16px; }
+.gh-user-input {
+  background: #161b22; border: 1px solid #30363d; color: #e6edf3; padding: 8px 12px;
+  border-radius: 6px; font-size: 14px; width: 200px; font-family: inherit;
+  outline: none; transition: border-color 0.2s;
 }
-.share-buttons button {
-  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
-  padding: 8px 16px; font-size: 14px; border-radius: 6px; cursor: pointer;
-  display: flex; align-items: center; gap: 6px; transition: background 0.2s;
-}
-.share-buttons button:hover { background: #30363d; }
-.share-buttons .primary-share {
-  background: #238636; border-color: #238636;
-}
-.share-buttons .primary-share:hover { background: #2ea043; }
-.share-status {
-  font-size: 12px; color: #39d353; margin-top: 6px; min-height: 18px;
-}
+.gh-user-input:focus { border-color: #58a6ff; }
+.gh-user-input::placeholder { color: #484f58; }
+.gh-avatar-preview { width: 36px; height: 36px; border-radius: 50%; background: #30363d; display: none; }
+
+/* Compact title leaderboard */
+.lb-mini { margin-top: 12px; }
+.lb-mini .lb-container { padding: 10px 14px; }
+.lb-mini .lb-title { font-size: 14px; margin-bottom: 6px; }
+.lb-mini .lb-table { font-size: 12px; }
+.lb-mini .lb-table td { padding: 3px 5px; }
+.lb-mini .lb-avatar { width: 20px; height: 20px; }
+.lb-mini .lb-avatar-placeholder { width: 20px; height: 20px; }
+
 .hidden { display: none !important; }
 </style>
 </head>
@@ -81,7 +100,12 @@ canvas { display: block; width: 100%; height: 100%; }
     <h1>STONE FACE</h1>
     <h2>Keep a straight face for 60 seconds</h2>
     <p>The game will throw everything it can at you. Don't react.</p>
+    <div class="gh-user-row">
+      <img id="ghAvatarPreview" class="gh-avatar-preview" alt="">
+      <input id="ghUsernameInput" class="gh-user-input" type="text" placeholder="Your GitHub username" autocomplete="off" spellcheck="false">
+    </div>
     <p id="highScoreDisplay" style="color:#f0c674;font-size:16px;margin-bottom:4px;"></p>
+    <div id="titleLeaderboard" class="lb-mini"></div>
     <button id="startBtn">Start Game</button>
   </div>
 </div>
@@ -385,6 +409,90 @@ function saveHighScore(time, comp) {
     return true;
   }
   return false;
+}
+
+// --- Leaderboard ---
+function getStoredUsername() {
+  return localStorage.getItem('github_username') || '';
+}
+
+function setStoredUsername(name) {
+  localStorage.setItem('github_username', name.trim());
+}
+
+function getLeaderboard() {
+  try {
+    return JSON.parse(localStorage.getItem('stoneFace_leaderboard') || '[]');
+  } catch { return []; }
+}
+
+function saveLeaderboard(entries) {
+  localStorage.setItem('stoneFace_leaderboard', JSON.stringify(entries));
+}
+
+function sortLeaderboard(entries) {
+  return entries.sort((a, b) => {
+    if (b.timeSurvived !== a.timeSurvived) return b.timeSurvived - a.timeSurvived;
+    if (a.won && b.won) return b.composure - a.composure;
+    if (a.won) return -1;
+    if (b.won) return 1;
+    return b.composure - a.composure;
+  });
+}
+
+function qualifiesForLeaderboard(time, comp) {
+  const lb = getLeaderboard();
+  if (lb.length < 10) return true;
+  const sorted = sortLeaderboard([...lb]);
+  const worst = sorted[sorted.length - 1];
+  if (time > worst.timeSurvived) return true;
+  if (time === worst.timeSurvived && comp > worst.composure) return true;
+  return false;
+}
+
+function addToLeaderboard(entry) {
+  const lb = getLeaderboard();
+  lb.push(entry);
+  const sorted = sortLeaderboard(lb);
+  saveLeaderboard(sorted.slice(0, 10));
+}
+
+function avatarUrl(username, size) {
+  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=${size}` : '';
+}
+
+function formatDate(dateStr) {
+  const d = new Date(dateStr);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[d.getMonth()] + ' ' + d.getDate();
+}
+
+function renderLeaderboardTable(entries, currentId, maxRows) {
+  const rows = entries.slice(0, maxRows || 10);
+  if (rows.length === 0) return '<p style="color:#484f58;font-size:13px;">No scores yet. Be the first!</p>';
+
+  let html = '<table class="lb-table"><thead><tr><th>#</th><th></th><th>Player</th><th>Time</th><th>Composure</th><th>Date</th></tr></thead><tbody>';
+  rows.forEach((e, i) => {
+    const isCurrent = currentId && e.id === currentId;
+    const cls = isCurrent ? ' class="lb-current"' : '';
+    const avatarHtml = e.username
+      ? `<img class="lb-avatar" src="${avatarUrl(e.username, 48)}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-block'" alt=""><span class="lb-avatar-placeholder" style="display:none"></span>`
+      : '<span class="lb-avatar-placeholder"></span>';
+    const name = e.username || 'Anonymous';
+    const timeStr = e.won ? e.timeSurvived + 's 👑' : e.timeSurvived + 's';
+    html += `<tr${cls}><td class="lb-rank">${i + 1}</td><td>${avatarHtml}</td><td>${name}</td><td>${timeStr}</td><td>${e.composure}%</td><td>${formatDate(e.date)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function renderTitleLeaderboard() {
+  const el = document.getElementById('titleLeaderboard');
+  if (!el) return;
+  const lb = getLeaderboard();
+  if (lb.length === 0) { el.innerHTML = ''; return; }
+  const sorted = sortLeaderboard([...lb]);
+  el.innerHTML = `<div class="lb-container"><div class="lb-title">\u{1F3C6} LEADERBOARD</div>${renderLeaderboardTable(sorted, null, 5)}</div>`;
 }
 
 function playCountdownBeep(freq) {
@@ -879,176 +987,6 @@ function drawFlashingBorder(elapsed) {
   ctx.restore();
 }
 
-// --- Share Card ---
-function renderShareCard(won, survivalTime) {
-  const cardW = 1200, cardH = 630;
-  const sc = document.createElement("canvas");
-  sc.width = cardW;
-  sc.height = cardH;
-  const c = sc.getContext("2d");
-
-  // Background
-  c.fillStyle = "#0d1117";
-  c.fillRect(0, 0, cardW, cardH);
-
-  // Subtle grid pattern
-  c.strokeStyle = "rgba(48,54,61,0.3)";
-  c.lineWidth = 1;
-  for (let x = 0; x < cardW; x += 30) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, cardH); c.stroke(); }
-  for (let y = 0; y < cardH; y += 30) { c.beginPath(); c.moveTo(0, y); c.lineTo(cardW, y); c.stroke(); }
-
-  // Find the worst screenshot (highest deviation) or victory shot
-  let heroShot = null;
-  if (screenshots.length > 0) {
-    heroShot = screenshots.reduce((best, s) => s.deviation > best.deviation ? s : best, screenshots[0]);
-  }
-
-  // Draw hero webcam frame (left side)
-  const frameX = 40, frameY = 80, frameW = 480, frameH = 360;
-  c.fillStyle = "#161b22";
-  c.fillRect(frameX - 4, frameY - 4, frameW + 8, frameH + 8);
-
-  if (heroShot) {
-    const img = new Image();
-    img.src = heroShot.url;
-    try {
-      c.drawImage(img, frameX, frameY, frameW, frameH);
-    } catch(e) {
-      c.fillStyle = "#21262d";
-      c.fillRect(frameX, frameY, frameW, frameH);
-    }
-  } else {
-    c.fillStyle = "#21262d";
-    c.fillRect(frameX, frameY, frameW, frameH);
-    c.fillStyle = "#8b949e";
-    c.font = "24px -apple-system, sans-serif";
-    c.textAlign = "center";
-    c.fillText("No screenshot", frameX + frameW / 2, frameY + frameH / 2);
-  }
-
-  // Frame border color based on win/lose
-  c.strokeStyle = won ? "#39d353" : "#f85149";
-  c.lineWidth = 4;
-  c.strokeRect(frameX - 4, frameY - 4, frameW + 8, frameH + 8);
-
-  // Corner brackets for dramatic framing
-  const bLen = 30, bW = 3;
-  c.strokeStyle = won ? "#39d353" : "#f85149";
-  c.lineWidth = bW;
-  [[frameX-8, frameY-8, 1, 1], [frameX+frameW+8, frameY-8, -1, 1],
-   [frameX-8, frameY+frameH+8, 1, -1], [frameX+frameW+8, frameY+frameH+8, -1, -1]].forEach(([bx, by, dx, dy]) => {
-    c.beginPath();
-    c.moveTo(bx + dx * bLen, by);
-    c.lineTo(bx, by);
-    c.lineTo(bx, by + dy * bLen);
-    c.stroke();
-  });
-
-  // Right side: Title
-  const textX = 570;
-  c.textAlign = "left";
-  c.fillStyle = "#e6edf3";
-  c.font = "bold 48px -apple-system, sans-serif";
-  c.fillText("STONE FACE", textX, 120);
-
-  // Result
-  if (won) {
-    c.fillStyle = "#39d353";
-    c.font = "bold 32px -apple-system, sans-serif";
-    c.fillText("CHAMPION", textX, 165);
-    c.fillStyle = "#e6edf3";
-    c.font = "28px -apple-system, sans-serif";
-    c.fillText("Survived 60 seconds", textX, 210);
-  } else {
-    c.fillStyle = "#f85149";
-    c.font = "bold 32px -apple-system, sans-serif";
-    c.fillText("CRACKED", textX, 165);
-    c.fillStyle = "#e6edf3";
-    c.font = "bold 64px -apple-system, sans-serif";
-    c.fillText(survivalTime + "s", textX, 250);
-  }
-
-  // The provocation that broke them (last active one)
-  if (!won && activeProvocations.length > 0) {
-    const breakingProv = activeProvocations[activeProvocations.length - 1].text;
-    c.fillStyle = "#f0c674";
-    c.font = "italic 18px -apple-system, sans-serif";
-    const maxW = cardW - textX - 40;
-    // Word wrap
-    const words = breakingProv.split(" ");
-    let line = '"';
-    let lineY = won ? 240 : 300;
-    words.forEach(w => {
-      const test = line + w + " ";
-      if (c.measureText(test).width > maxW && line.length > 1) {
-        c.fillText(line, textX, lineY);
-        lineY += 24;
-        line = w + " ";
-      } else {
-        line = test;
-      }
-    });
-    c.fillText(line.trimEnd() + '"', textX, lineY);
-  }
-
-  // Mini composure sparkline
-  if (composureHistory.length > 1) {
-    const spX = textX, spY = won ? 270 : 360, spW = 560, spH = 80;
-
-    c.fillStyle = "rgba(22,27,34,0.8)";
-    c.fillRect(spX, spY, spW, spH);
-    c.strokeStyle = "#21262d";
-    c.lineWidth = 1;
-    c.strokeRect(spX, spY, spW, spH);
-
-    // Label
-    c.fillStyle = "#8b949e";
-    c.font = "11px -apple-system, sans-serif";
-    c.textAlign = "left";
-    c.fillText("COMPOSURE", spX + 4, spY - 4);
-
-    // Draw the line
-    c.beginPath();
-    c.lineWidth = 2;
-    const maxT = GAME_DURATION;
-    composureHistory.forEach((pt, i) => {
-      const x = spX + (pt.t / maxT) * spW;
-      const y = spY + spH - (pt.v / COMPOSURE_MAX) * spH;
-      if (pt.v / COMPOSURE_MAX > 0.6) c.strokeStyle = "#39d353";
-      else if (pt.v / COMPOSURE_MAX > 0.3) c.strokeStyle = "#f0c674";
-      else c.strokeStyle = "#f85149";
-      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
-    });
-    c.stroke();
-  }
-
-  // Challenge text
-  c.textAlign = "left";
-  c.fillStyle = "#8b949e";
-  c.font = "20px -apple-system, sans-serif";
-  const challengeY = won ? 390 : 480;
-  c.fillText(won ? "Can you survive 60 seconds?" : `Can you beat ${survivalTime}s?`, textX, challengeY);
-
-  // Bottom bar
-  c.fillStyle = "#161b22";
-  c.fillRect(0, cardH - 60, cardW, 60);
-  c.fillStyle = "#8b949e";
-  c.font = "16px -apple-system, sans-serif";
-  c.textAlign = "center";
-  c.fillText("Keep a straight face. The game fights back.", cardW / 2, cardH - 24);
-
-  // Screenshot count badge (bottom-left)
-  if (screenshots.length > 0 && !won) {
-    const badgeText = screenshots.length + " moment" + (screenshots.length !== 1 ? "s" : "") + " of weakness";
-    c.textAlign = "left";
-    c.fillStyle = "#f85149";
-    c.font = "bold 13px -apple-system, sans-serif";
-    c.fillText(badgeText, frameX, frameY + frameH + 24);
-  }
-
-  return sc;
-}
-
 // --- Game Over Screen ---
 function showGameOver(won) {
   state = "gameover";
@@ -1079,104 +1017,144 @@ function showGameOver(won) {
   overlay.classList.add("interactive");
   overlayBg.style.display = "block";
 
-  // Build the share card
-  const shareCanvas = renderShareCard(won, survivalTime);
-
   let html = "";
   if (won) {
-    html += `<h1 style="color:#f0c674;font-size:42px;text-shadow:0 0 30px rgba(240,198,100,0.5);margin-bottom:8px;">STONE FACE CHAMPION!</h1>`;
+    html += `<h1 style="color:#f0c674;font-size:56px;text-shadow:0 0 30px rgba(240,198,100,0.5);">STONE FACE CHAMPION!</h1>`;
+    html += `<p style="color:#e6edf3;">You survived 60 seconds${finalComposure >= 100 ? ' with full composure' : ''}. Respect.</p>`;
   } else {
-    html += `<h1 style="color:#f85149;margin-bottom:8px;">YOU CRACKED!</h1>`;
+    html += `<h1 style="color:#f85149;">YOU CRACKED!</h1>`;
+    html += `<p style="color:#e6edf3;">You lasted ${survivalTime} seconds.</p>`;
   }
 
   if (isNewRecord) {
-    html += `<p style="color:#f0c674;font-size:18px;font-weight:bold;margin:4px 0;">\u{1F3C6} NEW RECORD!</p>`;
+    html += `<p style="color:#f0c674;font-size:22px;font-weight:bold;margin:8px 0;">\u{1F3C6} NEW RECORD!</p>`;
   }
 
-  // Share card as hero element
-  html += `<div id="share-card-container"><canvas id="share-card-canvas"></canvas></div>`;
-  html += `<div class="share-buttons">`;
-  html += `<button class="primary-share" id="downloadBtn">\u{2B07}\u{FE0F} Save Image</button>`;
-  html += `<button id="copyBtn">\u{1F4CB} Copy</button>`;
-  html += `<button id="nativeShareBtn">\u{1F4E4} Share</button>`;
-  html += `</div>`;
-  html += `<div class="share-status" id="shareStatus"></div>`;
+  // Composure graph
+  if (composureHistory.length > 1) {
+    html += `<canvas id="composure-graph" width="500" height="120"></canvas>`;
+  }
 
-  // Collapsible gallery
-  if (screenshots.length > 1) {
-    html += `<details style="margin-top:12px;"><summary style="font-size:13px;color:#8b949e;cursor:pointer;">All moments of weakness (${screenshots.length})</summary>`;
+  // Screenshot gallery
+  if (screenshots.length > 0) {
+    html += `<p style="font-size:14px;color:#8b949e;margin-top:16px;">Moments of weakness (${screenshots.length})</p>`;
     html += `<div id="game-over-gallery">`;
     screenshots.forEach(s => {
       html += `<img src="${s.url}" title="t=${s.time.toFixed(1)}s dev=${s.deviation.toFixed(2)}">`;
     });
-    html += `</div></details>`;
+    html += `</div>`;
   }
 
-  html += `<button id="replayBtn" style="margin-top:16px;">Play Again</button>`;
+  html += `<button id="replayBtn">Play Again</button>`;
+
+  // Leaderboard section
+  const username = getStoredUsername();
+  const scoreId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const qualifies = qualifiesForLeaderboard(survivalTime, finalComposure);
+
+  html += `<div style="margin-top:20px;">`;
+  if (qualifies) {
+    if (username) {
+      html += `<button id="saveScoreBtn" class="lb-save-btn" data-id="${scoreId}" data-time="${survivalTime}" data-comp="${finalComposure}" data-won="${won}">Save to Leaderboard</button>`;
+    } else {
+      html += `<p class="lb-save-hint">Enter a GitHub username on the title screen to save your score</p>`;
+    }
+  }
+  html += `</div>`;
+
+  // Full leaderboard
+  const lb = sortLeaderboard([...getLeaderboard()]);
+  html += `<div class="lb-container" style="margin-top:16px;"><div class="lb-title">\u{1F3C6} LEADERBOARD</div><div id="gameOverLb">${renderLeaderboardTable(lb, null, 10)}</div></div>`;
+
   overlayContent.innerHTML = html;
 
-  // Render share card into the visible canvas
+  // Draw composure graph
   requestAnimationFrame(() => {
-    const visibleCanvas = document.getElementById("share-card-canvas");
-    if (visibleCanvas) {
-      visibleCanvas.width = shareCanvas.width;
-      visibleCanvas.height = shareCanvas.height;
-      visibleCanvas.getContext("2d").drawImage(shareCanvas, 0, 0);
-    }
+    const graphCanvas = document.getElementById("composure-graph");
+    if (graphCanvas && composureHistory.length > 1) {
+      const gctx = graphCanvas.getContext("2d");
+      const gw = graphCanvas.width;
+      const gh = graphCanvas.height;
+      gctx.fillStyle = "#161b22";
+      gctx.fillRect(0, 0, gw, gh);
 
-    // Download button
-    document.getElementById("downloadBtn")?.addEventListener("click", () => {
-      shareCanvas.toBlob(blob => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `stone-face-${survivalTime}s.png`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-        document.getElementById("shareStatus").textContent = "Saved!";
-      }, "image/png");
-    });
-
-    // Copy to clipboard
-    document.getElementById("copyBtn")?.addEventListener("click", async () => {
-      try {
-        const blob = await new Promise(r => shareCanvas.toBlob(r, "image/png"));
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        document.getElementById("shareStatus").textContent = "Copied to clipboard!";
-      } catch(e) {
-        document.getElementById("shareStatus").textContent = "Copy not supported in this browser";
+      // Grid lines
+      gctx.strokeStyle = "#21262d";
+      gctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const gy = gh * i / 4;
+        gctx.beginPath(); gctx.moveTo(0, gy); gctx.lineTo(gw, gy); gctx.stroke();
       }
-    });
 
-    // Native share (mobile)
-    const nativeBtn = document.getElementById("nativeShareBtn");
-    if (navigator.share && navigator.canShare) {
-      nativeBtn?.addEventListener("click", async () => {
-        try {
-          const blob = await new Promise(r => shareCanvas.toBlob(r, "image/png"));
-          const file = new File([blob], `stone-face-${survivalTime}s.png`, { type: "image/png" });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              title: "Stone Face",
-              text: won ? "I survived 60 seconds of Stone Face!" : `I lasted ${survivalTime}s at Stone Face. Can you beat that?`,
-              files: [file]
-            });
-          } else {
-            await navigator.share({
-              title: "Stone Face",
-              text: won ? "I survived 60 seconds of Stone Face!" : `I lasted ${survivalTime}s at Stone Face. Can you beat that?`
-            });
-          }
-        } catch(e) {
-          if (e.name !== "AbortError") {
-            document.getElementById("shareStatus").textContent = "Share cancelled";
-          }
-        }
+      // Line
+      gctx.beginPath();
+      gctx.strokeStyle = "#39d353";
+      gctx.lineWidth = 2;
+      composureHistory.forEach((pt, i) => {
+        const x = (pt.t / GAME_DURATION) * gw;
+        const y = gh - (pt.v / COMPOSURE_MAX) * gh;
+        if (pt.v / COMPOSURE_MAX > 0.6) gctx.strokeStyle = "#39d353";
+        else if (pt.v / COMPOSURE_MAX > 0.3) gctx.strokeStyle = "#f0c674";
+        else gctx.strokeStyle = "#f85149";
+        if (i === 0) gctx.moveTo(x, y); else gctx.lineTo(x, y);
       });
-    } else if (nativeBtn) {
-      nativeBtn.style.display = "none";
+      gctx.stroke();
+
+      // Peak deviation marker
+      let peakIdx = 0, peakDev = 0;
+      composureHistory.forEach((pt, i) => {
+        if (pt.d > peakDev) { peakDev = pt.d; peakIdx = i; }
+      });
+      if (peakDev > 0) {
+        const px = (composureHistory[peakIdx].t / GAME_DURATION) * gw;
+        const py = gh - (composureHistory[peakIdx].v / COMPOSURE_MAX) * gh;
+        gctx.fillStyle = "#f85149";
+        gctx.beginPath(); gctx.arc(px, py, 5, 0, Math.PI * 2); gctx.fill();
+        gctx.fillStyle = "#e6edf3";
+        gctx.font = "11px sans-serif";
+        gctx.textAlign = "center";
+        gctx.fillText("peak", px, py - 10);
+      }
+
+      // Labels
+      gctx.fillStyle = "#8b949e";
+      gctx.font = "10px sans-serif";
+      gctx.textAlign = "left";
+      gctx.fillText("100%", 4, 12);
+      gctx.fillText("0%", 4, gh - 4);
+      gctx.textAlign = "center";
+      gctx.fillText("0s", 20, gh - 4);
+      gctx.fillText("60s", gw - 20, gh - 4);
     }
 
     document.getElementById("replayBtn")?.addEventListener("click", () => resetGame());
+
+    // Save score button
+    const saveBtn = document.getElementById("saveScoreBtn");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", () => {
+        const uname = getStoredUsername();
+        if (!uname) return;
+        const entry = {
+          username: uname,
+          avatar: avatarUrl(uname, 48),
+          timeSurvived: parseInt(saveBtn.dataset.time),
+          composure: parseInt(saveBtn.dataset.comp),
+          won: saveBtn.dataset.won === 'true',
+          date: new Date().toISOString(),
+          id: saveBtn.dataset.id
+        };
+        addToLeaderboard(entry);
+        saveBtn.textContent = '\u2713 Saved!';
+        saveBtn.disabled = true;
+        // Re-render leaderboard
+        const lbEl = document.getElementById("gameOverLb");
+        if (lbEl) {
+          const updated = sortLeaderboard([...getLeaderboard()]);
+          lbEl.innerHTML = renderLeaderboardTable(updated, entry.id, 10);
+        }
+      });
+    }
   });
 }
 
@@ -1458,6 +1436,41 @@ async function init() {
     const composureText = hs.composure >= 100 ? ' (full composure!)' : '';
     hsDisplay.textContent = `BEST: ${hs.time}s${composureText}`;
   }
+
+  // Username input + avatar preview
+  const ghInput = document.getElementById('ghUsernameInput');
+  const ghAvatar = document.getElementById('ghAvatarPreview');
+  const storedName = getStoredUsername();
+  if (storedName && ghInput) {
+    ghInput.value = storedName;
+    if (ghAvatar) {
+      ghAvatar.src = avatarUrl(storedName, 80);
+      ghAvatar.style.display = 'block';
+      ghAvatar.onerror = () => { ghAvatar.style.display = 'none'; };
+    }
+  }
+  let avatarDebounce = null;
+  if (ghInput) {
+    ghInput.addEventListener('input', () => {
+      const val = ghInput.value.trim();
+      setStoredUsername(val);
+      clearTimeout(avatarDebounce);
+      if (!val) {
+        if (ghAvatar) ghAvatar.style.display = 'none';
+        return;
+      }
+      avatarDebounce = setTimeout(() => {
+        if (ghAvatar) {
+          ghAvatar.src = avatarUrl(val, 80);
+          ghAvatar.style.display = 'block';
+          ghAvatar.onerror = () => { ghAvatar.style.display = 'none'; };
+        }
+      }, 400);
+    });
+  }
+
+  // Title screen leaderboard
+  renderTitleLeaderboard();
 
   startBtn.addEventListener("click", async () => {
     startBtn.disabled = true;
